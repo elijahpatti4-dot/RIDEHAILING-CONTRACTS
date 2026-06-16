@@ -5,10 +5,16 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
+interface IPricingOracle {
+    function getRecommendedFare(uint256 distanceMeters, uint256 durationSeconds)
+        external view returns (uint256);
+}
+
 contract RideHailing is ReentrancyGuard, Ownable {
 
     IERC20 public usdc;
     address public treasury;
+    address public pricingOracle; // optional — set via setPricingOracle()
     uint256 public platformFeePct = 5;
     uint256 public bondPct = 10;
     uint256 public timeoutWindow = 30 minutes;
@@ -48,6 +54,9 @@ contract RideHailing is ReentrancyGuard, Ownable {
         bytes32 evidenceHash;
         address disputeRaisedBy;
         bytes32 routeLogHash;
+        // ── Cash ride fields ──────────────────────────────────────────────────
+        bool isCashRide;            // true = rider pays driver in cash; no USDC escrow from rider
+        bool cashSettlementPending; // set after rider calls completeRide; cleared by confirmCashReceived
     }
 
     struct Reputation {
@@ -64,6 +73,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
     mapping(address => Reputation) public reputations;
     uint256 public rideCount;
 
+    event PricingOracleSet(address indexed oracle);
     event RideRequested(uint256 indexed rideId, address indexed rider, bytes32 pickupHash, bytes32 dropoffHash, uint256 recommendedFare, uint256 bandMin, uint256 bandMax);
     event OfferMade(uint256 indexed rideId, address indexed by, uint256 amount);
     event RideAccepted(uint256 indexed rideId, address indexed driver, uint256 agreedFare);
@@ -79,6 +89,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
     event RideCancelled(uint256 indexed rideId);
     event DriverVerified(address indexed driver);
     event RatingSubmitted(uint256 indexed rideId, address indexed rater, address indexed rated, uint256 score);
+    event CashPaymentConfirmed(uint256 indexed rideId, address indexed driver, uint256 fee);
 
     constructor(address _usdc, address _treasury) Ownable() {
         usdc = IERC20(_usdc);
@@ -100,7 +111,24 @@ contract RideHailing is ReentrancyGuard, Ownable {
         _;
     }
 
-    function requestRide(bytes32 _pickupHash, bytes32 _dropoffHash, uint256 _recommendedFare, uint256 _expectedDuration, uint256 _openingOffer) external returns (uint256) {
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Core ride flow
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @param _isCashRide  When true the rider pays the driver in cash; no USDC
+     *                     escrow is taken from the rider on acceptOffer.
+     *                     The 5% platform fee is instead deducted from the
+     *                     driver's USDC wallet when they call confirmCashReceived.
+     */
+    function requestRide(
+        bytes32 _pickupHash,
+        bytes32 _dropoffHash,
+        uint256 _recommendedFare,
+        uint256 _expectedDuration,
+        uint256 _openingOffer,
+        bool    _isCashRide
+    ) external returns (uint256) {
         require(_recommendedFare > 0, "Fare must be greater than zero");
         uint256 bandMin = (_recommendedFare * bandMinPct) / 100;
         uint256 bandMax = (_recommendedFare * bandMaxPct) / 100;
@@ -120,6 +148,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
         r.requestedAt = block.timestamp;
         r.expectedDuration = _expectedDuration;
         r.state = RideState.REQUESTED;
+        r.isCashRide = _isCashRide;
         emit RideRequested(rideId, msg.sender, _pickupHash, _dropoffHash, _recommendedFare, bandMin, bandMax);
         emit OfferMade(rideId, msg.sender, _openingOffer);
         return rideId;
@@ -165,7 +194,11 @@ contract RideHailing is ReentrancyGuard, Ownable {
         r.driverBond = bond;
         r.acceptedAt = block.timestamp;
         r.state = RideState.ACCEPTED;
-        require(usdc.transferFrom(r.rider, address(this), r.agreedFare), "Rider USDC deposit failed");
+
+        // Cash rides: only the driver bond locks; rider pays in cash at ride end
+        if (!r.isCashRide) {
+            require(usdc.transferFrom(r.rider, address(this), r.agreedFare), "Rider USDC deposit failed");
+        }
         if (bond > 0) { require(usdc.transferFrom(r.driver, address(this), bond), "Driver bond deposit failed"); }
         emit RideAccepted(rideId, r.driver, r.agreedFare);
     }
@@ -204,8 +237,11 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(r.amendmentPending, "No amendment pending");
         uint256 oldFare = r.agreedFare;
         uint256 newFare = r.newFareProposed;
-        if (newFare > oldFare) { require(usdc.transferFrom(r.rider, address(this), newFare - oldFare), "Additional fare payment failed"); }
-        else if (newFare < oldFare) { require(usdc.transfer(r.rider, oldFare - newFare), "Fare refund failed"); }
+        // For digital rides, adjust escrow; for cash rides, just update the agreed fare
+        if (!r.isCashRide) {
+            if (newFare > oldFare) { require(usdc.transferFrom(r.rider, address(this), newFare - oldFare), "Additional fare payment failed"); }
+            else if (newFare < oldFare) { require(usdc.transfer(r.rider, oldFare - newFare), "Fare refund failed"); }
+        }
         r.agreedFare = newFare;
         r.dropoffHash = r.newDropoffHash;
         r.amendmentPending = false;
@@ -224,8 +260,42 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(!r.amendmentPending, "Resolve pending amendment first");
         r.completedAt = block.timestamp;
         r.state = RideState.COMPLETED;
-        _settlePayment(rideId);
+        if (r.isCashRide) {
+            // Rider has paid in cash; driver must call confirmCashReceived to settle platform fee
+            r.cashSettlementPending = true;
+        } else {
+            _settlePayment(rideId);
+        }
         _updateReputation(r.driver, r.rider);
+    }
+
+    /**
+     * @notice Driver confirms they have received the cash fare from the rider.
+     *         The 5% platform fee is deducted from the driver's USDC wallet via
+     *         transferFrom.  The driver bond (if any) is returned.
+     *
+     *         Must be called after the rider has called completeRide on a cash ride.
+     *
+     * @param rideId The ride to settle.
+     */
+    function confirmCashReceived(uint256 rideId) external nonReentrant {
+        Ride storage r = rides[rideId];
+        require(msg.sender == r.driver, "Only the driver can confirm cash received");
+        require(r.isCashRide, "Not a cash ride");
+        require(r.cashSettlementPending, "Cash settlement not pending");
+
+        r.cashSettlementPending = false;
+
+        uint256 fee = (r.agreedFare * platformFeePct) / 100;
+        // Driver pays the platform fee from their own USDC wallet
+        require(usdc.transferFrom(r.driver, treasury, fee), "Platform fee transfer failed");
+        // Return driver bond
+        if (r.driverBond > 0) {
+            require(usdc.transfer(r.driver, r.driverBond), "Bond return failed");
+        }
+
+        emit CashPaymentConfirmed(rideId, r.driver, fee);
+        emit RideCompleted(rideId, r.agreedFare - fee, fee);
     }
 
     function claimTimeout(uint256 rideId) external onlyDriver(rideId) inState(rideId, RideState.IN_PROGRESS) nonReentrant {
@@ -236,10 +306,19 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(block.timestamp >= deadline, "Timeout window has not passed yet");
         r.completedAt = block.timestamp;
         r.state = RideState.COMPLETED;
-        _settlePayment(rideId);
+        if (r.isCashRide) {
+            // Driver presumably has the cash; they still owe the platform fee
+            r.cashSettlementPending = true;
+        } else {
+            _settlePayment(rideId);
+        }
         _updateReputation(r.driver, r.rider);
         emit TimeoutClaimed(rideId, msg.sender);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Internal payment settlement
+    // ─────────────────────────────────────────────────────────────────────────
 
     function _settlePayment(uint256 rideId) internal {
         Ride storage r = rides[rideId];
@@ -250,6 +329,10 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(usdc.transfer(treasury, fee), "Treasury fee transfer failed");
         emit RideCompleted(rideId, driverPayout, fee);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Dispute system
+    // ─────────────────────────────────────────────────────────────────────────
 
     function raiseDispute(uint256 rideId, bytes32 _evidenceHash) external inState(rideId, RideState.IN_PROGRESS) {
         Ride storage r = rides[rideId];
@@ -277,21 +360,33 @@ contract RideHailing is ReentrancyGuard, Ownable {
         Ride storage r = rides[rideId];
         r.state = RideState.COMPLETED;
         if (winner == r.rider) {
-            require(usdc.transfer(r.rider, r.agreedFare), "Rider refund failed");
+            if (!r.isCashRide) {
+                // Digital ride: refund rider from escrow
+                require(usdc.transfer(r.rider, r.agreedFare), "Rider refund failed");
+            }
+            // Slash driver bond to treasury (applies to both cash and digital)
             if (r.driverBond > 0) { require(usdc.transfer(treasury, r.driverBond), "Bond slash failed"); }
             reputations[r.driver].disputesLost++;
             _recalculateTier(r.driver);
         } else {
-            uint256 fee = (r.agreedFare * platformFeePct) / 100;
-            uint256 driverPayout = r.agreedFare - fee;
-            require(usdc.transfer(r.driver, driverPayout), "Driver payout failed");
+            if (!r.isCashRide) {
+                // Digital ride: pay driver from escrow
+                uint256 fee = (r.agreedFare * platformFeePct) / 100;
+                uint256 driverPayout = r.agreedFare - fee;
+                require(usdc.transfer(r.driver, driverPayout), "Driver payout failed");
+                require(usdc.transfer(treasury, fee), "Treasury fee failed");
+            }
+            // Return driver bond (applies to both cash and digital)
             if (r.driverBond > 0) { require(usdc.transfer(r.driver, r.driverBond), "Bond return failed"); }
-            require(usdc.transfer(treasury, fee), "Treasury fee failed");
             reputations[r.rider].disputesLost++;
             _recalculateTier(r.rider);
         }
         emit DisputeResolved(rideId, winner, tier);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Ratings and reputation
+    // ─────────────────────────────────────────────────────────────────────────
 
     function submitRating(uint256 rideId, uint256 score) external {
         Ride storage r = rides[rideId];
@@ -330,6 +425,10 @@ contract RideHailing is ReentrancyGuard, Ownable {
         else { rep.tier = ReputationTier.NEW; }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    //  Admin setters
+    // ─────────────────────────────────────────────────────────────────────────
+
     function setPlatformFee(uint256 _pct) external onlyOwner {
         require(_pct <= 10, "Fee cannot exceed 10");
         platformFeePct = _pct;
@@ -348,6 +447,38 @@ contract RideHailing is ReentrancyGuard, Ownable {
     function setTimeoutWindow(uint256 _seconds) external onlyOwner {
         require(_seconds >= 10 minutes, "Timeout too short");
         timeoutWindow = _seconds;
+    }
+
+    /**
+     * @notice Wire up the PricingOracle contract.
+     *         Pass address(0) to disable oracle-assisted fare suggestions.
+     *         The oracle is NOT enforced on-chain — it is queried by the
+     *         frontend to pre-fill the recommendedFare field and is available
+     *         for on-chain reads via getOracleFare().
+     */
+    function setPricingOracle(address _oracle) external onlyOwner {
+        pricingOracle = _oracle;
+        emit PricingOracleSet(_oracle);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  View helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Query the wired PricingOracle for the recommended fare.
+     *         Called by the frontend before requestRide to pre-fill the fare field.
+     * @param distanceMeters   Trip distance in metres.
+     * @param durationSeconds  Expected duration in seconds.
+     * @return fare            Recommended USDC fare (6 decimals), or 0 if no oracle set.
+     */
+    function getOracleFare(uint256 distanceMeters, uint256 durationSeconds)
+        external
+        view
+        returns (uint256 fare)
+    {
+        if (pricingOracle == address(0)) return 0;
+        return IPricingOracle(pricingOracle).getRecommendedFare(distanceMeters, durationSeconds);
     }
 
     function getRide(uint256 rideId) external view returns (Ride memory) { return rides[rideId]; }

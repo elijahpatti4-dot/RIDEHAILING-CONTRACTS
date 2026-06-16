@@ -41,10 +41,22 @@ describe("RideHailing Contract", function () {
 
   async function setupAcceptedRide() {
     await rideHailing.connect(rider).requestRide(
-      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE
+      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
     );
     await rideHailing.connect(driver).acceptOffer(1);
     return 1;
+  }
+
+  // ── Cash ride helpers ─────────────────────────────────────────────────────
+
+  async function setupCashRide() {
+    await rideHailing.connect(rider).requestRide(
+      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+    );
+    const rideId = await rideHailing.rideCount();
+    await rideHailing.connect(driver).acceptOffer(rideId);
+    await rideHailing.connect(rider).startRide(rideId);
+    return rideId;
   }
 
   async function setupInProgressRide() {
@@ -58,7 +70,7 @@ describe("RideHailing Contract", function () {
     it("Rider can request a ride with a valid opening offer", async function () {
       await expect(
         rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
         )
       ).to.emit(rideHailing, "RideRequested");
       const ride = await rideHailing.getRide(1);
@@ -69,7 +81,7 @@ describe("RideHailing Contract", function () {
     it("Rejects an opening offer below the band minimum", async function () {
       await expect(
         rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(5)
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(5), false
         )
       ).to.be.revertedWith("Opening offer outside negotiation band");
     });
@@ -77,14 +89,14 @@ describe("RideHailing Contract", function () {
     it("Rejects an opening offer above the band maximum", async function () {
       await expect(
         rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(20)
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(20), false
         )
       ).to.be.revertedWith("Opening offer outside negotiation band");
     });
 
     it("Rider can accept the recommended fare outright", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10)
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), false
       );
       await rideHailing.connect(rider).acceptRecommended(1);
       const ride = await rideHailing.getRide(1);
@@ -97,7 +109,7 @@ describe("RideHailing Contract", function () {
 
     beforeEach(async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10)
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), false
       );
     });
 
@@ -377,7 +389,7 @@ describe("RideHailing Contract", function () {
     it("Average score is computed correctly", async function () {
       for (let i = 0; i < 10; i++) {
         await rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
         );
         const rideId = i + 1;
         await rideHailing.connect(driver).acceptOffer(rideId);
@@ -408,6 +420,237 @@ describe("RideHailing Contract", function () {
       await expect(
         rideHailing.connect(stranger).setPlatformFee(1)
       ).to.be.reverted;
+    });
+
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Cash payment support (Section 3)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe("Cash ride — isCashRide flag", function () {
+
+    it("requestRide stores isCashRide = true when flag is set", async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+      );
+      const ride = await rideHailing.getRide(1);
+      expect(ride.isCashRide).to.equal(true);
+    });
+
+    it("requestRide stores isCashRide = false for digital rides", async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
+      );
+      const ride = await rideHailing.getRide(1);
+      expect(ride.isCashRide).to.equal(false);
+    });
+
+  });
+
+  describe("Cash ride — acceptOffer skips rider escrow", function () {
+
+    it("rider USDC balance is unchanged after acceptOffer on cash ride", async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+      );
+      const rideId = await rideHailing.rideCount();
+      const riderBefore = await usdc.balanceOf(rider.address);
+      await rideHailing.connect(driver).acceptOffer(rideId);
+      const riderAfter = await usdc.balanceOf(rider.address);
+      // Rider pays nothing — cash ride
+      expect(riderAfter).to.equal(riderBefore);
+    });
+
+    it("driver bond still locks on cash ride acceptOffer", async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+      );
+      const rideId = await rideHailing.rideCount();
+      const driverBefore = await usdc.balanceOf(driver.address);
+      await rideHailing.connect(driver).acceptOffer(rideId);
+      const driverAfter = await usdc.balanceOf(driver.address);
+      const expectedBond = REC_FARE * 10n / 100n; // NEW tier — 10%
+      expect(driverBefore - driverAfter).to.equal(expectedBond);
+    });
+
+    it("contract holds only the driver bond (not the fare) on cash acceptOffer", async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+      );
+      const rideId = await rideHailing.rideCount();
+      const contractBefore = await usdc.balanceOf(await rideHailing.getAddress());
+      await rideHailing.connect(driver).acceptOffer(rideId);
+      const contractAfter = await usdc.balanceOf(await rideHailing.getAddress());
+      const expectedBond = REC_FARE * 10n / 100n;
+      expect(contractAfter - contractBefore).to.equal(expectedBond);
+    });
+
+  });
+
+  describe("Cash ride — completeRide sets cashSettlementPending", function () {
+
+    it("completeRide on cash ride sets cashSettlementPending = true", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      const ride = await rideHailing.getRide(rideId);
+      expect(ride.cashSettlementPending).to.equal(true);
+      expect(ride.state).to.equal(3); // COMPLETED
+    });
+
+    it("completeRide on cash ride does NOT transfer USDC to driver immediately", async function () {
+      const rideId = await setupCashRide();
+      const driverBefore = await usdc.balanceOf(driver.address);
+      await rideHailing.connect(rider).completeRide(rideId);
+      const driverAfter = await usdc.balanceOf(driver.address);
+      // Driver receives nothing yet — bond still locked, no escrow settlement
+      expect(driverAfter).to.equal(driverBefore);
+    });
+
+    it("completeRide on cash ride does NOT send fee to treasury immediately", async function () {
+      const rideId = await setupCashRide();
+      const treasuryBefore = await usdc.balanceOf(treasury.address);
+      await rideHailing.connect(rider).completeRide(rideId);
+      const treasuryAfter = await usdc.balanceOf(treasury.address);
+      expect(treasuryAfter).to.equal(treasuryBefore);
+    });
+
+    it("completeRide on cash ride still updates driver and rider activity counters", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      const driverRep = await rideHailing.getReputation(driver.address);
+      const riderRep  = await rideHailing.getReputation(rider.address);
+      expect(driverRep.totalRides).to.equal(1);
+      expect(driverRep.completionCount).to.equal(1);
+      expect(riderRep.totalRides).to.equal(1);
+    });
+
+  });
+
+  describe("Cash ride — confirmCashReceived", function () {
+
+    it("driver can call confirmCashReceived after rider completes cash ride", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await expect(
+        rideHailing.connect(driver).confirmCashReceived(rideId)
+      ).to.emit(rideHailing, "CashPaymentConfirmed");
+    });
+
+    it("confirmCashReceived deducts exactly 5% platform fee from driver USDC", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      const driverBefore = await usdc.balanceOf(driver.address);
+      const treasuryBefore = await usdc.balanceOf(treasury.address);
+      await rideHailing.connect(driver).confirmCashReceived(rideId);
+      const driverAfter  = await usdc.balanceOf(driver.address);
+      const treasuryAfter = await usdc.balanceOf(treasury.address);
+      const fee = REC_FARE * 5n / 100n;
+      const bond = REC_FARE * 10n / 100n;
+      // Driver loses the fee but gets bond back: net = bond - fee
+      expect(driverBefore - driverAfter).to.equal(fee - bond);
+      expect(treasuryAfter - treasuryBefore).to.equal(fee);
+    });
+
+    it("confirmCashReceived returns driver bond to driver", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      const driverBefore = await usdc.balanceOf(driver.address);
+      await rideHailing.connect(driver).confirmCashReceived(rideId);
+      const driverAfter = await usdc.balanceOf(driver.address);
+      const fee  = REC_FARE * 5n / 100n;
+      const bond = REC_FARE * 10n / 100n;
+      // Net change: +bond (returned) −fee (platform) = bond − fee
+      expect(driverAfter - driverBefore).to.equal(bond - fee);
+    });
+
+    it("confirmCashReceived clears cashSettlementPending", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await rideHailing.connect(driver).confirmCashReceived(rideId);
+      const ride = await rideHailing.getRide(rideId);
+      expect(ride.cashSettlementPending).to.equal(false);
+    });
+
+    it("confirmCashReceived emits RideCompleted event", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await expect(
+        rideHailing.connect(driver).confirmCashReceived(rideId)
+      ).to.emit(rideHailing, "RideCompleted");
+    });
+
+    it("rider cannot call confirmCashReceived", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await expect(
+        rideHailing.connect(rider).confirmCashReceived(rideId)
+      ).to.be.revertedWith("Only the driver can confirm cash received");
+    });
+
+    it("stranger cannot call confirmCashReceived", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await expect(
+        rideHailing.connect(stranger).confirmCashReceived(rideId)
+      ).to.be.revertedWith("Only the driver can confirm cash received");
+    });
+
+    it("confirmCashReceived reverts if called on a digital ride", async function () {
+      const rideId = await setupInProgressRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await expect(
+        rideHailing.connect(driver).confirmCashReceived(rideId)
+      ).to.be.revertedWith("Not a cash ride");
+    });
+
+    it("confirmCashReceived cannot be called twice", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await rideHailing.connect(driver).confirmCashReceived(rideId);
+      await expect(
+        rideHailing.connect(driver).confirmCashReceived(rideId)
+      ).to.be.revertedWith("Cash settlement not pending");
+    });
+
+    it("confirmCashReceived cannot be called before rider calls completeRide", async function () {
+      const rideId = await setupCashRide();
+      // completeRide not yet called — cashSettlementPending is false
+      await expect(
+        rideHailing.connect(driver).confirmCashReceived(rideId)
+      ).to.be.revertedWith("Cash settlement not pending");
+    });
+
+  });
+
+  describe("Cash ride — amendment fare update (no USDC movement)", function () {
+
+    it("amendment on cash ride updates agreedFare without transferring USDC", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).proposeAmendment(rideId, NEW_DROPOFF, USDC(14));
+      const riderBefore = await usdc.balanceOf(rider.address);
+      await rideHailing.connect(driver).acceptAmendment(rideId);
+      const riderAfter = await usdc.balanceOf(rider.address);
+      // No USDC should move — cash ride
+      expect(riderAfter).to.equal(riderBefore);
+      const ride = await rideHailing.getRide(rideId);
+      expect(ride.agreedFare).to.equal(USDC(14));
+    });
+
+  });
+
+  describe("Cash ride — ratings work identically to digital rides", function () {
+
+    it("both parties can rate each other after cash ride confirmation", async function () {
+      const rideId = await setupCashRide();
+      await rideHailing.connect(rider).completeRide(rideId);
+      await rideHailing.connect(driver).confirmCashReceived(rideId);
+      await expect(
+        rideHailing.connect(rider).submitRating(rideId, 5)
+      ).to.emit(rideHailing, "RatingSubmitted");
+      await expect(
+        rideHailing.connect(driver).submitRating(rideId, 4)
+      ).to.emit(rideHailing, "RatingSubmitted");
     });
 
   });
