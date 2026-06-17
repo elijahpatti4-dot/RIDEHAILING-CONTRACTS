@@ -16,6 +16,7 @@ module.exports = {
       url: process.env.AMOY_RPC_URL || "https://rpc-amoy.polygon.technology",
       accounts: process.env.PRIVATE_KEY ? [`0x${process.env.PRIVATE_KEY.replace(/^0x/, "")}`] : [],
       chainId: 80002,
+      gasPrice: 50_000_000_000, // 50 gwei — bypasses EIP-1559 high fee estimation
     },
     polygon: {
       url: process.env.POLYGON_RPC_URL || "https://polygon-rpc.com",
@@ -35,5 +36,9 @@ module.exports = {
   gasReporter: {
     enabled: process.env.REPORT_GAS === "true",
     currency: "USD",
+  },
+
+  mocha: {
+    spec: "test/**/*.{js,cjs,mjs}",
   },
 };

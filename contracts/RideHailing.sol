@@ -26,6 +26,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
     enum RideState { REQUESTED, ACCEPTED, IN_PROGRESS, COMPLETED, DISPUTED, CANCELLED }
     enum DisputeTier { NONE, AUTO, COMMUNITY, KLEROS }
     enum ReputationTier { NEW, ESTABLISHED, TRUSTED, ELITE }
+    /// @notice 0=USDC escrow  1=cash (physical)  2=M-Pesa mobile money
+    enum PaymentMethod { USDC, CASH, MPESA }
 
     struct Ride {
         address rider;
@@ -54,9 +56,10 @@ contract RideHailing is ReentrancyGuard, Ownable {
         bytes32 evidenceHash;
         address disputeRaisedBy;
         bytes32 routeLogHash;
-        // ── Cash ride fields ──────────────────────────────────────────────────
-        bool isCashRide;            // true = rider pays driver in cash; no USDC escrow from rider
-        bool cashSettlementPending; // set after rider calls completeRide; cleared by confirmCashReceived
+        // ── Off-chain payment fields ─────────────────────────────────────────
+        PaymentMethod paymentMethod;  // USDC | CASH | MPESA
+        bool settlementPending;       // set after completeRide on CASH or MPESA ride
+        string mpesaCode;             // M-Pesa transaction ID stored on confirmation
     }
 
     struct Reputation {
@@ -90,6 +93,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
     event DriverVerified(address indexed driver);
     event RatingSubmitted(uint256 indexed rideId, address indexed rater, address indexed rated, uint256 score);
     event CashPaymentConfirmed(uint256 indexed rideId, address indexed driver, uint256 fee);
+    event MpesaPaymentConfirmed(uint256 indexed rideId, address indexed driver, uint256 fee, string mpesaCode);
 
     constructor(address _usdc, address _treasury) Ownable() {
         usdc = IERC20(_usdc);
@@ -116,18 +120,20 @@ contract RideHailing is ReentrancyGuard, Ownable {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * @param _isCashRide  When true the rider pays the driver in cash; no USDC
-     *                     escrow is taken from the rider on acceptOffer.
-     *                     The 5% platform fee is instead deducted from the
-     *                     driver's USDC wallet when they call confirmCashReceived.
+     * @param _paymentMethod  0 = USDC escrow (default)
+     *                        1 = Cash — rider pays driver physically; 5% fee pulled
+     *                            from driver via confirmCashReceived.
+     *                        2 = M-Pesa — rider sends mobile money to driver; 5% fee
+     *                            pulled from driver via confirmMpesaReceived (with
+     *                            the M-Pesa transaction code stored on-chain).
      */
     function requestRide(
-        bytes32 _pickupHash,
-        bytes32 _dropoffHash,
-        uint256 _recommendedFare,
-        uint256 _expectedDuration,
-        uint256 _openingOffer,
-        bool    _isCashRide
+        bytes32       _pickupHash,
+        bytes32       _dropoffHash,
+        uint256       _recommendedFare,
+        uint256       _expectedDuration,
+        uint256       _openingOffer,
+        PaymentMethod _paymentMethod
     ) external returns (uint256) {
         require(_recommendedFare > 0, "Fare must be greater than zero");
         uint256 bandMin = (_recommendedFare * bandMinPct) / 100;
@@ -148,7 +154,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
         r.requestedAt = block.timestamp;
         r.expectedDuration = _expectedDuration;
         r.state = RideState.REQUESTED;
-        r.isCashRide = _isCashRide;
+        r.paymentMethod = _paymentMethod;
         emit RideRequested(rideId, msg.sender, _pickupHash, _dropoffHash, _recommendedFare, bandMin, bandMax);
         emit OfferMade(rideId, msg.sender, _openingOffer);
         return rideId;
@@ -195,8 +201,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
         r.acceptedAt = block.timestamp;
         r.state = RideState.ACCEPTED;
 
-        // Cash rides: only the driver bond locks; rider pays in cash at ride end
-        if (!r.isCashRide) {
+        // USDC rides: lock rider escrow now. CASH/MPESA rides: no rider escrow.
+        if (r.paymentMethod == PaymentMethod.USDC) {
             require(usdc.transferFrom(r.rider, address(this), r.agreedFare), "Rider USDC deposit failed");
         }
         if (bond > 0) { require(usdc.transferFrom(r.driver, address(this), bond), "Driver bond deposit failed"); }
@@ -238,7 +244,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
         uint256 oldFare = r.agreedFare;
         uint256 newFare = r.newFareProposed;
         // For digital rides, adjust escrow; for cash rides, just update the agreed fare
-        if (!r.isCashRide) {
+        if (r.paymentMethod == PaymentMethod.USDC) {
             if (newFare > oldFare) { require(usdc.transferFrom(r.rider, address(this), newFare - oldFare), "Additional fare payment failed"); }
             else if (newFare < oldFare) { require(usdc.transfer(r.rider, oldFare - newFare), "Fare refund failed"); }
         }
@@ -260,9 +266,9 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(!r.amendmentPending, "Resolve pending amendment first");
         r.completedAt = block.timestamp;
         r.state = RideState.COMPLETED;
-        if (r.isCashRide) {
-            // Rider has paid in cash; driver must call confirmCashReceived to settle platform fee
-            r.cashSettlementPending = true;
+        if (r.paymentMethod != PaymentMethod.USDC) {
+            // CASH/MPESA: driver confirms receipt separately to settle platform fee
+            r.settlementPending = true;
         } else {
             _settlePayment(rideId);
         }
@@ -274,27 +280,49 @@ contract RideHailing is ReentrancyGuard, Ownable {
      *         The 5% platform fee is deducted from the driver's USDC wallet via
      *         transferFrom.  The driver bond (if any) is returned.
      *
-     *         Must be called after the rider has called completeRide on a cash ride.
-     *
-     * @param rideId The ride to settle.
+     *         Must be called after the rider calls completeRide on a CASH ride.
      */
     function confirmCashReceived(uint256 rideId) external nonReentrant {
         Ride storage r = rides[rideId];
         require(msg.sender == r.driver, "Only the driver can confirm cash received");
-        require(r.isCashRide, "Not a cash ride");
-        require(r.cashSettlementPending, "Cash settlement not pending");
+        require(r.paymentMethod == PaymentMethod.CASH, "Not a cash ride");
+        require(r.settlementPending, "Settlement not pending");
 
-        r.cashSettlementPending = false;
+        r.settlementPending = false;
 
         uint256 fee = (r.agreedFare * platformFeePct) / 100;
-        // Driver pays the platform fee from their own USDC wallet
         require(usdc.transferFrom(r.driver, treasury, fee), "Platform fee transfer failed");
-        // Return driver bond
-        if (r.driverBond > 0) {
-            require(usdc.transfer(r.driver, r.driverBond), "Bond return failed");
-        }
+        if (r.driverBond > 0) { require(usdc.transfer(r.driver, r.driverBond), "Bond return failed"); }
 
         emit CashPaymentConfirmed(rideId, r.driver, fee);
+        emit RideCompleted(rideId, r.agreedFare - fee, fee);
+    }
+
+    /**
+     * @notice Driver confirms M-Pesa payment received and records the
+     *         M-Pesa transaction code on-chain for auditability.
+     *         The 5% platform fee is deducted from the driver's USDC wallet.
+     *
+     *         Must be called after the rider calls completeRide on an MPESA ride.
+     *
+     * @param rideId    The ride to settle.
+     * @param mpesaCode The M-Pesa transaction code (e.g. "RBC1A2B3C4D").
+     */
+    function confirmMpesaReceived(uint256 rideId, string calldata mpesaCode) external nonReentrant {
+        Ride storage r = rides[rideId];
+        require(msg.sender == r.driver, "Only the driver can confirm M-Pesa received");
+        require(r.paymentMethod == PaymentMethod.MPESA, "Not an M-Pesa ride");
+        require(r.settlementPending, "Settlement not pending");
+        require(bytes(mpesaCode).length > 0, "M-Pesa code required");
+
+        r.settlementPending = false;
+        r.mpesaCode = mpesaCode;
+
+        uint256 fee = (r.agreedFare * platformFeePct) / 100;
+        require(usdc.transferFrom(r.driver, treasury, fee), "Platform fee transfer failed");
+        if (r.driverBond > 0) { require(usdc.transfer(r.driver, r.driverBond), "Bond return failed"); }
+
+        emit MpesaPaymentConfirmed(rideId, r.driver, fee, mpesaCode);
         emit RideCompleted(rideId, r.agreedFare - fee, fee);
     }
 
@@ -306,9 +334,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(block.timestamp >= deadline, "Timeout window has not passed yet");
         r.completedAt = block.timestamp;
         r.state = RideState.COMPLETED;
-        if (r.isCashRide) {
-            // Driver presumably has the cash; they still owe the platform fee
-            r.cashSettlementPending = true;
+        if (r.paymentMethod != PaymentMethod.USDC) {
+            r.settlementPending = true;
         } else {
             _settlePayment(rideId);
         }
@@ -360,17 +387,17 @@ contract RideHailing is ReentrancyGuard, Ownable {
         Ride storage r = rides[rideId];
         r.state = RideState.COMPLETED;
         if (winner == r.rider) {
-            if (!r.isCashRide) {
-                // Digital ride: refund rider from escrow
+            if (r.paymentMethod == PaymentMethod.USDC) {
+                // Refund rider from escrow
                 require(usdc.transfer(r.rider, r.agreedFare), "Rider refund failed");
             }
-            // Slash driver bond to treasury (applies to both cash and digital)
+            // Slash driver bond to treasury (all payment types)
             if (r.driverBond > 0) { require(usdc.transfer(treasury, r.driverBond), "Bond slash failed"); }
             reputations[r.driver].disputesLost++;
             _recalculateTier(r.driver);
         } else {
-            if (!r.isCashRide) {
-                // Digital ride: pay driver from escrow
+            if (r.paymentMethod == PaymentMethod.USDC) {
+                // Pay driver from escrow
                 uint256 fee = (r.agreedFare * platformFeePct) / 100;
                 uint256 driverPayout = r.agreedFare - fee;
                 require(usdc.transfer(r.driver, driverPayout), "Driver payout failed");

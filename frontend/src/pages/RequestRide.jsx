@@ -18,32 +18,64 @@ function hashLocation(str) {
 // USDC has 6 decimals
 const USDC = (n) => parseUnits(String(n), 6);
 
+// PaymentMethod enum (must match RideHailing.sol)
+const PM = { USDC: 0, CASH: 1, MPESA: 2 };
+
+const PAYMENT_OPTIONS = [
+  {
+    value: PM.USDC,
+    label: "USDC",
+    icon: "💳",
+    description: "Pay via USDC escrow — secure on-chain settlement",
+  },
+  {
+    value: PM.CASH,
+    label: "Cash",
+    icon: "💵",
+    description: "Pay driver in cash — no USDC deposit from rider",
+  },
+  {
+    value: PM.MPESA,
+    label: "M-Pesa",
+    icon: "📱",
+    description: "Pay via M-Pesa — driver confirms receipt with transaction code",
+  },
+];
+
+function paymentLabel(pm) {
+  if (pm === 1n) return "💵 Cash";
+  if (pm === 2n) return "📱 M-Pesa";
+  return "💳 USDC";
+}
+
 export default function RequestRide() {
   const { address, isConnected } = useAccount();
 
   // Form state
-  const [pickup, setPickup]   = useState("");
-  const [dropoff, setDropoff] = useState("");
-  const [fare, setFare]       = useState("");
-  const [isCash, setIsCash]   = useState(false);
-  const [duration, setDuration] = useState("1200"); // 20 min default
+  const [pickup, setPickup]         = useState("");
+  const [dropoff, setDropoff]       = useState("");
+  const [fare, setFare]             = useState("");
+  const [paymentMethod, setPayment] = useState(PM.USDC);
+  const [duration, setDuration]     = useState("1200"); // 20 min default
 
-  // Lookup state
-  const [lookupId, setLookupId] = useState("");
-  const [rideId, setRideId]     = useState(null);
+  // Lookup + M-Pesa confirmation
+  const [lookupId, setLookupId]   = useState("");
+  const [rideId, setRideId]       = useState(null);
+  const [mpesaCode, setMpesaCode] = useState("");
 
   // Write hooks
-  const { writeContract: approve,    data: approveTxHash } = useWriteContract();
+  const { writeContract: approve,     data: approveTxHash } = useWriteContract();
   const { writeContract: requestRide, data: requestTxHash } = useWriteContract();
-  const { writeContract: startRide,   data: startTxHash   } = useWriteContract();
+  const { writeContract: startRide  } = useWriteContract();
   const { writeContract: completeRide } = useWriteContract();
   const { writeContract: confirmCash  } = useWriteContract();
+  const { writeContract: confirmMpesa } = useWriteContract();
   const { writeContract: cancelRide   } = useWriteContract();
 
-  // Wait for approval tx to confirm before allowing request
+  // Wait for approval tx
   const { isSuccess: approveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash });
 
-  // Current ride state read
+  // Current ride state
   const { data: ride, refetch: refetchRide } = useReadContract({
     address: ADDRESSES.RIDE_HAILING,
     abi: RIDE_HAILING_ABI,
@@ -52,7 +84,7 @@ export default function RequestRide() {
     query: { enabled: !!rideId },
   });
 
-  // USDC allowance check
+  // USDC allowance
   const { data: allowance } = useReadContract({
     address: ADDRESSES.USDC,
     abi: ERC20_ABI,
@@ -71,14 +103,15 @@ export default function RequestRide() {
   });
 
   const fareRaw = fare ? USDC(fare) : 0n;
-  const needsApproval = !isCash && allowance !== undefined && allowance < fareRaw;
+  const isOffChain   = paymentMethod === PM.CASH || paymentMethod === PM.MPESA;
+  const needsApproval = !isOffChain && allowance !== undefined && allowance < fareRaw;
 
   function handleApprove() {
     approve({
       address: ADDRESSES.USDC,
       abi: ERC20_ABI,
       functionName: "approve",
-      args: [ADDRESSES.RIDE_HAILING, fareRaw * 2n], // approve 2× for amendments
+      args: [ADDRESSES.RIDE_HAILING, fareRaw * 2n], // 2× headroom for amendments
     });
   }
 
@@ -90,20 +123,22 @@ export default function RequestRide() {
         address: ADDRESSES.RIDE_HAILING,
         abi: RIDE_HAILING_ABI,
         functionName: "requestRide",
-        args: [pickupHash, dropoffHash, fareRaw, BigInt(duration), fareRaw, isCash],
+        // 6th arg is PaymentMethod enum: 0=USDC, 1=CASH, 2=MPESA
+        args: [pickupHash, dropoffHash, fareRaw, BigInt(duration), fareRaw, paymentMethod],
       },
-      {
-        onSuccess: () => refetchRide(),
-      }
+      { onSuccess: () => refetchRide() }
     );
   }
 
   function handleLookup() {
-    const id = BigInt(lookupId || "0");
-    setRideId(id);
+    setRideId(BigInt(lookupId || "0"));
   }
 
-  const canRequest = isConnected && pickup && dropoff && fare && (isCash || !needsApproval);
+  const canRequest = isConnected && pickup && dropoff && fare && (isOffChain || !needsApproval);
+  const isRider  = isConnected && address?.toLowerCase() === ride?.rider?.toLowerCase();
+  const isDriver = isConnected && address?.toLowerCase() === ride?.driver?.toLowerCase();
+  const settlementPending = ride?.settlementPending;
+  const ridePayment = ride?.paymentMethod; // 0n | 1n | 2n
 
   return (
     <div className="space-y-6">
@@ -112,7 +147,8 @@ export default function RequestRide() {
       {/* ── USDC balance ─────────────────────────────────────────────────── */}
       {isConnected && (
         <p className="text-sm text-gray-400">
-          USDC balance: <span className="text-white font-medium">{formatUSDC(usdcBalance)}</span>
+          USDC balance:{" "}
+          <span className="text-white font-medium">{formatUSDC(usdcBalance)}</span>
         </p>
       )}
 
@@ -162,34 +198,45 @@ export default function RequestRide() {
           </div>
         </div>
 
-        {/* Cash ride toggle */}
-        <label className="flex items-center gap-3 cursor-pointer select-none">
-          <div
-            onClick={() => setIsCash((v) => !v)}
-            className={`w-11 h-6 rounded-full relative transition-colors ${
-              isCash ? "bg-brand-500" : "bg-gray-600"
-            }`}
-          >
-            <span
-              className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${
-                isCash ? "translate-x-6" : "translate-x-1"
-              }`}
-            />
+        {/* ── Payment method selector ───────────────────────────────────── */}
+        <div>
+          <label className="label mb-2">Payment method</label>
+          <div className="grid grid-cols-3 gap-2">
+            {PAYMENT_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setPayment(opt.value)}
+                className={`rounded-xl border px-3 py-3 text-left transition-all ${
+                  paymentMethod === opt.value
+                    ? "border-brand-500 bg-brand-500/10 text-white"
+                    : "border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500"
+                }`}
+              >
+                <div className="text-xl mb-1">{opt.icon}</div>
+                <div className="text-sm font-medium">{opt.label}</div>
+                <div className="text-xs text-gray-500 mt-0.5 leading-tight">{opt.description}</div>
+              </button>
+            ))}
           </div>
-          <span className="text-sm font-medium">
-            {isCash ? "Cash ride — driver collects fare in cash" : "Digital ride — USDC escrow"}
-          </span>
-        </label>
+        </div>
 
-        {isCash && (
+        {/* Payment method info banners */}
+        {paymentMethod === PM.CASH && (
           <p className="text-xs text-yellow-400 bg-yellow-400/10 rounded-lg px-3 py-2">
-            Cash ride: no USDC deposit from you. After completion, the driver pays the 5%
-            platform fee from their USDC wallet when they call "Confirm Cash Received".
+            Cash ride: no USDC deposit from you. After arrival, pay the driver in cash.
+            The driver then confirms receipt on-chain and pays the 5% platform fee from their USDC wallet.
+          </p>
+        )}
+        {paymentMethod === PM.MPESA && (
+          <p className="text-xs text-green-400 bg-green-400/10 rounded-lg px-3 py-2">
+            M-Pesa ride: no USDC deposit from you. After arrival, send payment to the driver via
+            M-Pesa. The driver confirms with their M-Pesa transaction code — stored on-chain for
+            auditability — and pays the 5% platform fee from their USDC wallet.
           </p>
         )}
 
-        {/* Approve step for digital rides */}
-        {!isCash && needsApproval && (
+        {/* USDC approve step */}
+        {paymentMethod === PM.USDC && needsApproval && (
           <button className="btn-secondary w-full" onClick={handleApprove}>
             Step 1: Approve USDC spending
           </button>
@@ -202,15 +249,13 @@ export default function RequestRide() {
         >
           {!isConnected
             ? "Connect wallet first"
-            : isCash || !needsApproval
-            ? "Request Ride"
-            : "Approve USDC first"}
+            : paymentMethod === PM.USDC && needsApproval
+            ? "Approve USDC first"
+            : "Request Ride"}
         </button>
 
         {requestTxHash && (
-          <p className="text-xs text-gray-400 break-all">
-            Tx: {requestTxHash}
-          </p>
+          <p className="text-xs text-gray-400 break-all">Tx: {requestTxHash}</p>
         )}
       </div>
 
@@ -239,17 +284,29 @@ export default function RequestRide() {
             <Row label="Rider"       value={ride.rider} mono />
             <Row label="Driver"      value={ride.driver || "—"} mono />
             <Row label="Agreed Fare" value={formatUSDC(ride.agreedFare)} />
-            <Row label="Type"        value={ride.isCashRide ? "💵 Cash" : "💳 Digital"} />
-            {ride.cashSettlementPending && (
+            <Row label="Payment"     value={paymentLabel(ridePayment)} />
+
+            {/* M-Pesa code (shown after confirmation) */}
+            {ridePayment === 2n && ride.mpesaCode && (
+              <Row label="M-Pesa Code" value={ride.mpesaCode} mono />
+            )}
+
+            {/* Settlement pending banners */}
+            {settlementPending && ridePayment === 1n && (
               <p className="text-xs text-yellow-400 bg-yellow-400/10 rounded px-3 py-2">
                 Awaiting driver to confirm cash received.
               </p>
             )}
+            {settlementPending && ridePayment === 2n && (
+              <p className="text-xs text-green-400 bg-green-400/10 rounded px-3 py-2">
+                Awaiting driver to confirm M-Pesa received with transaction code.
+              </p>
+            )}
 
-            {/* Rider actions */}
-            {isConnected && address?.toLowerCase() === ride.rider?.toLowerCase() && (
+            {/* ── Rider actions ─────────────────────────────────────────── */}
+            {isRider && (
               <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-800">
-                {ride.state === 1 /* ACCEPTED */ && (
+                {ride.state === 1n /* ACCEPTED */ && (
                   <button
                     className="btn-primary"
                     onClick={() =>
@@ -264,7 +321,7 @@ export default function RequestRide() {
                     Start Ride
                   </button>
                 )}
-                {ride.state === 2 /* IN_PROGRESS */ && (
+                {ride.state === 2n /* IN_PROGRESS */ && (
                   <button
                     className="btn-primary"
                     onClick={() =>
@@ -279,7 +336,7 @@ export default function RequestRide() {
                     Complete Ride
                   </button>
                 )}
-                {ride.state === 0 /* REQUESTED */ && (
+                {ride.state === 0n /* REQUESTED */ && (
                   <button
                     className="btn-danger"
                     onClick={() =>
@@ -297,25 +354,52 @@ export default function RequestRide() {
               </div>
             )}
 
-            {/* Driver: confirm cash */}
-            {isConnected &&
-              address?.toLowerCase() === ride.driver?.toLowerCase() &&
-              ride.isCashRide &&
-              ride.cashSettlementPending && (
+            {/* ── Driver: confirm cash ──────────────────────────────────── */}
+            {isDriver && ridePayment === 1n && settlementPending && (
+              <button
+                className="btn-primary w-full"
+                onClick={() =>
+                  confirmCash({
+                    address: ADDRESSES.RIDE_HAILING,
+                    abi: RIDE_HAILING_ABI,
+                    functionName: "confirmCashReceived",
+                    args: [rideId],
+                  })
+                }
+              >
+                Confirm Cash Received (pays 5% platform fee)
+              </button>
+            )}
+
+            {/* ── Driver: confirm M-Pesa ────────────────────────────────── */}
+            {isDriver && ridePayment === 2n && settlementPending && (
+              <div className="space-y-2 pt-2 border-t border-gray-800">
+                <label className="label">M-Pesa Transaction Code</label>
+                <input
+                  className="input"
+                  placeholder="e.g. RBC1A2B3C4D"
+                  value={mpesaCode}
+                  onChange={(e) => setMpesaCode(e.target.value.toUpperCase())}
+                />
                 <button
                   className="btn-primary w-full"
+                  disabled={!mpesaCode}
                   onClick={() =>
-                    confirmCash({
+                    confirmMpesa({
                       address: ADDRESSES.RIDE_HAILING,
                       abi: RIDE_HAILING_ABI,
-                      functionName: "confirmCashReceived",
-                      args: [rideId],
+                      functionName: "confirmMpesaReceived",
+                      args: [rideId, mpesaCode],
                     })
                   }
                 >
-                  Confirm Cash Received (pays 5% fee)
+                  📱 Confirm M-Pesa Received (pays 5% platform fee)
                 </button>
-              )}
+                <p className="text-xs text-gray-500">
+                  The transaction code is stored on-chain as proof of payment.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </div>

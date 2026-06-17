@@ -41,7 +41,7 @@ describe("RideHailing Contract", function () {
 
   async function setupAcceptedRide() {
     await rideHailing.connect(rider).requestRide(
-      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
+      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 0
     );
     await rideHailing.connect(driver).acceptOffer(1);
     return 1;
@@ -51,7 +51,7 @@ describe("RideHailing Contract", function () {
 
   async function setupCashRide() {
     await rideHailing.connect(rider).requestRide(
-      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+      PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 1
     );
     const rideId = await rideHailing.rideCount();
     await rideHailing.connect(driver).acceptOffer(rideId);
@@ -70,7 +70,7 @@ describe("RideHailing Contract", function () {
     it("Rider can request a ride with a valid opening offer", async function () {
       await expect(
         rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 0
         )
       ).to.emit(rideHailing, "RideRequested");
       const ride = await rideHailing.getRide(1);
@@ -81,7 +81,7 @@ describe("RideHailing Contract", function () {
     it("Rejects an opening offer below the band minimum", async function () {
       await expect(
         rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(5), false
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(5), 0
         )
       ).to.be.revertedWith("Opening offer outside negotiation band");
     });
@@ -89,14 +89,14 @@ describe("RideHailing Contract", function () {
     it("Rejects an opening offer above the band maximum", async function () {
       await expect(
         rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(20), false
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(20), 0
         )
       ).to.be.revertedWith("Opening offer outside negotiation band");
     });
 
     it("Rider can accept the recommended fare outright", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), false
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), 0
       );
       await rideHailing.connect(rider).acceptRecommended(1);
       const ride = await rideHailing.getRide(1);
@@ -109,7 +109,7 @@ describe("RideHailing Contract", function () {
 
     beforeEach(async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), false
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), 0
       );
     });
 
@@ -389,7 +389,7 @@ describe("RideHailing Contract", function () {
     it("Average score is computed correctly", async function () {
       for (let i = 0; i < 10; i++) {
         await rideHailing.connect(rider).requestRide(
-          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
+          PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 0
         );
         const rideId = i + 1;
         await rideHailing.connect(driver).acceptOffer(rideId);
@@ -432,18 +432,18 @@ describe("RideHailing Contract", function () {
 
     it("requestRide stores isCashRide = true when flag is set", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 1
       );
       const ride = await rideHailing.getRide(1);
-      expect(ride.isCashRide).to.equal(true);
+      expect(ride.paymentMethod).to.equal(1n);
     });
 
     it("requestRide stores isCashRide = false for digital rides", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, false
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 0
       );
       const ride = await rideHailing.getRide(1);
-      expect(ride.isCashRide).to.equal(false);
+      expect(ride.paymentMethod).to.equal(0n);
     });
 
   });
@@ -452,7 +452,7 @@ describe("RideHailing Contract", function () {
 
     it("rider USDC balance is unchanged after acceptOffer on cash ride", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 1
       );
       const rideId = await rideHailing.rideCount();
       const riderBefore = await usdc.balanceOf(rider.address);
@@ -464,7 +464,7 @@ describe("RideHailing Contract", function () {
 
     it("driver bond still locks on cash ride acceptOffer", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 1
       );
       const rideId = await rideHailing.rideCount();
       const driverBefore = await usdc.balanceOf(driver.address);
@@ -476,7 +476,7 @@ describe("RideHailing Contract", function () {
 
     it("contract holds only the driver bond (not the fare) on cash acceptOffer", async function () {
       await rideHailing.connect(rider).requestRide(
-        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, true
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, REC_FARE, 1
       );
       const rideId = await rideHailing.rideCount();
       const contractBefore = await usdc.balanceOf(await rideHailing.getAddress());
@@ -494,7 +494,7 @@ describe("RideHailing Contract", function () {
       const rideId = await setupCashRide();
       await rideHailing.connect(rider).completeRide(rideId);
       const ride = await rideHailing.getRide(rideId);
-      expect(ride.cashSettlementPending).to.equal(true);
+      expect(ride.settlementPending).to.equal(true);
       expect(ride.state).to.equal(3); // COMPLETED
     });
 
@@ -569,7 +569,7 @@ describe("RideHailing Contract", function () {
       await rideHailing.connect(rider).completeRide(rideId);
       await rideHailing.connect(driver).confirmCashReceived(rideId);
       const ride = await rideHailing.getRide(rideId);
-      expect(ride.cashSettlementPending).to.equal(false);
+      expect(ride.settlementPending).to.equal(false);
     });
 
     it("confirmCashReceived emits RideCompleted event", async function () {
@@ -610,15 +610,15 @@ describe("RideHailing Contract", function () {
       await rideHailing.connect(driver).confirmCashReceived(rideId);
       await expect(
         rideHailing.connect(driver).confirmCashReceived(rideId)
-      ).to.be.revertedWith("Cash settlement not pending");
+      ).to.be.revertedWith("Settlement not pending");
     });
 
     it("confirmCashReceived cannot be called before rider calls completeRide", async function () {
       const rideId = await setupCashRide();
-      // completeRide not yet called — cashSettlementPending is false
+      // completeRide not yet called — settlementPending is false
       await expect(
         rideHailing.connect(driver).confirmCashReceived(rideId)
-      ).to.be.revertedWith("Cash settlement not pending");
+      ).to.be.revertedWith("Settlement not pending");
     });
 
   });

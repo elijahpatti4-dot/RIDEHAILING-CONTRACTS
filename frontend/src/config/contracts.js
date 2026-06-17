@@ -4,15 +4,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const ADDRESSES = {
-  RIDE_HAILING:   "0x339Cf12fE5f2e92CBFADB06F19461B582de48ab4",
-  LICENCE:        "0x4375F62EdeAf6Edc593244c1D743aba6D6d3AB75",
-  TOKEN:          "0xE9Cc58690b45f2e21975dAC29340C3a94AB70F48",
-  GOVERNOR:       "0x9Be8F6da5e6D6305Ad4b6c64c7dd4d455BcFcad1",
-  TIMELOCK:       "0xdB36Dd71DcAC66687f314e37e4829E445B9A272C",
-  PRICING_ORACLE: "0xa10E8c882785136e290488Fd535a3c0B675d054e",
-  // MockUSDC on Polygon Amoy testnet (replace with real USDC on mainnet)
-  USDC:           "0x316CD43eB36952D6B49921AC0ECE618e836A2E01",
-  FOUNDER_VESTING: "0x58cAD69B3EE7b09556303970B24eEE030fbd952e",
+  RIDE_HAILING:   "0x798ed242E2f1E1D2C2D6D0e2E2e61824A2aAd5fa",
+  LICENCE:        "0x4C2d562e124eCdde5419bef51C9A5537a548a77A",
+  TOKEN:          "0x93089AaF3c41459AdD56B976D0ca48d03DCd3308",
+  GOVERNOR:       "0x568AC334d8B492e35C199465D9C6bC47F77030F9",
+  TIMELOCK:       "0xc931A41EA842abd542C913Dd7fE8C7D4058d3239",
+  PRICING_ORACLE: "0xe218e059bE172Ffb4C40F46675d62a4ac93BD6e1",
+  USDC:           "0xF76aAE142a1EEdaD7215D2f9B9BF164bd55fFfA7",
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,7 +29,7 @@ export const RIDE_HAILING_ABI = [
       { name: "_recommendedFare",  type: "uint256" },
       { name: "_expectedDuration", type: "uint256" },
       { name: "_openingOffer",     type: "uint256" },
-      { name: "_isCashRide",       type: "bool"    },
+      { name: "_paymentMethod",     type: "uint8"   },
     ],
     outputs: [{ name: "rideId", type: "uint256" }],
   },
@@ -106,6 +104,16 @@ export const RIDE_HAILING_ABI = [
     outputs: [],
   },
   {
+    name: "confirmMpesaReceived",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "rideId",    type: "uint256" },
+      { name: "mpesaCode", type: "string"  },
+    ],
+    outputs: [],
+  },
+  {
     name: "claimTimeout",
     type: "function",
     stateMutability: "nonpayable",
@@ -169,8 +177,9 @@ export const RIDE_HAILING_ABI = [
           { name: "evidenceHash",        type: "bytes32" },
           { name: "disputeRaisedBy",     type: "address" },
           { name: "routeLogHash",        type: "bytes32" },
-          { name: "isCashRide",          type: "bool"    },
-          { name: "cashSettlementPending", type: "bool"  },
+          { name: "paymentMethod",    type: "uint8"  },
+          { name: "settlementPending", type: "bool"  },
+          { name: "mpesaCode",        type: "string" },
         ],
       },
     ],
