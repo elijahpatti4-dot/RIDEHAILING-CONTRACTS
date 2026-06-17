@@ -79,7 +79,7 @@ export default function RequestRide() {
   const { data: ride, refetch: refetchRide } = useReadContract({
     address: ADDRESSES.RIDE_HAILING,
     abi: RIDE_HAILING_ABI,
-    functionName: "getRide",
+    functionName: "rides",
     args: [rideId ?? 0n],
     query: { enabled: !!rideId },
   });

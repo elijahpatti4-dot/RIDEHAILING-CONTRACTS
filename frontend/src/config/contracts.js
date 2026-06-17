@@ -121,6 +121,16 @@ export const RIDE_HAILING_ABI = [
     outputs: [],
   },
   {
+    name: "submitRouteLog",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "rideId",        type: "uint256" },
+      { name: "_routeLogHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  {
     name: "raiseDispute",
     type: "function",
     stateMutability: "nonpayable",
@@ -142,7 +152,7 @@ export const RIDE_HAILING_ABI = [
   },
   // Views
   {
-    name: "getRide",
+    name: "rides",
     type: "function",
     stateMutability: "view",
     inputs: [{ name: "rideId", type: "uint256" }],
@@ -218,6 +228,27 @@ export const RIDE_HAILING_ABI = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    name: "reputations",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "wallet", type: "address" }],
+    outputs: [
+      {
+        name: "",
+        type: "tuple",
+        components: [
+          { name: "totalRides",       type: "uint256" },
+          { name: "ratingSum",        type: "uint256" },
+          { name: "ratingCount",      type: "uint256" },
+          { name: "disputesLost",     type: "uint256" },
+          { name: "completionCount",  type: "uint256" },
+          { name: "isVerifiedDriver", type: "bool"    },
+          { name: "tier",             type: "uint8"   },
+        ],
+      },
+    ],
   },
   {
     name: "platformFeePct",
