@@ -69,7 +69,7 @@ async function main() {
       [deployer],
       deployer,
     ],
-    "contracts/RideChainGovernor.sol:TimelockController"
+    "@openzeppelin/contracts/governance/TimelockController.sol:TimelockController"
   );
 
   // 4. RideChainGovernor
