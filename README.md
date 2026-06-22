@@ -1,17 +1,45 @@
-# ridehailing-contracts
+# RideChain — Decentralised Ride-Hailing on Polygon
 
-Decentralised ride-hailing smart contracts built on Polygon.
-No central server. No company taking 25%. Rules enforced by code.
+> No central server. No company taking 25%. Rules enforced by code.
 
-## What this is
+RideChain is an open-source smart contract protocol that replaces the backend of a ride-hailing platform. Everything Uber does with servers, databases, and payment processors — RideChain does on the Polygon blockchain automatically.
 
-A complete smart contract system replacing the backend of a ride-hailing
-platform. Everything Uber does with servers, databases, and payment processors
-— this contract does on the blockchain automatically.
+Built for drivers in emerging markets who lose 25–30% of every fare to platform commissions. With RideChain, drivers keep 100%.
 
-## What the contract enforces
+**Target market:** Nairobi, Kenya · **Mainnet launch:** Q3 2026 · **Network:** Polygon PoS
 
-- Fare recommendation with negotiation band (±25%/+33%)
+---
+
+## Support this project
+
+RideChain is community-funded open-source infrastructure. We accept crypto donations on Giveth:
+
+**[🔗 Donate on Giveth](https://giveth.io/project/ridechain)** ← _link will be updated when live_
+
+This Giveth project page is the official community fundraising page for RideChain (github.com/elijahpatti4-dot/RIDEHAILING-CONTRACTS).
+
+Funds go directly toward:
+- Smart contract audit & remediation ($35K)
+- Polygon mainnet deployment ($3K)
+- Post-launch bug bounty program ($2K)
+- Community onboarding in Nairobi ($10K)
+
+---
+
+## Contracts
+
+| Contract | Purpose |
+|---|---|
+| RideHailing.sol | Core protocol — fare negotiation, escrow, dispute resolution |
+| MockUSDC.sol | Test token (excluded from audit scope) |
+
+**Solidity:** 0.8.20 · **Libraries:** OpenZeppelin · **Payments:** USDC escrow
+
+---
+
+## What the protocol enforces
+
+- Fare recommendation with negotiation band (±25% / +33%)
 - Pre-ride negotiation up to 5 rounds within 3 minutes
 - Rider-only ride start — physical presence as proof of pickup
 - USDC escrow — rider deposit + driver bond locked on acceptance
@@ -22,6 +50,27 @@ platform. Everything Uber does with servers, databases, and payment processors
 - Basic reputation tracking — tiers affect bond requirements
 - DAO-governed configuration with hard ceilings
 
+---
+
+## Security
+
+A professional smart contract security audit is currently in progress by a top-tier audit firm.
+
+Audit scope: `RideHailing.sol` (main protocol only). `MockUSDC.sol` is excluded — test token only.
+
+---
+
+## Status
+
+- [x] Smart contracts written and tested (38 tests passing)
+- [x] Security audit in progress
+- [ ] Audit remediation
+- [ ] Polygon mainnet deployment (Q3 2026)
+- [ ] Bug bounty launch
+- [ ] Nairobi pilot
+
+---
+
 ## Project structure
 
 ```
@@ -31,40 +80,20 @@ contracts/
 test/
   RideHailing.test.js — full test suite (38 tests)
 scripts/
-  deploy.js         — deployment script for Mumbai testnet
+  deploy.js         — deployment script
 ```
+
+---
 
 ## Setup
 
-You need Node.js installed. Download from https://nodejs.org (LTS version).
-
 ```bash
-# Install dependencies
 npm install
-
-# Compile contracts
 npx hardhat compile
-
-# Run all tests
 npx hardhat test
 ```
 
-## Running tests
-
-```bash
-npx hardhat test
-```
-
-All 38 tests should pass with green ticks.
-
-## Deploying to Mumbai testnet
-
-1. Install MetaMask: https://metamask.io
-2. Add Polygon Mumbai network to MetaMask
-3. Get free test MATIC: https://faucet.polygon.technology
-4. Export your wallet private key from MetaMask
-5. Set environment variable: set PRIVATE_KEY=your_key_here (Windows)
-6. Run: npx hardhat run scripts/deploy.js --network mumbai
+---
 
 ## Ride lifecycle
 
@@ -74,25 +103,23 @@ REQUESTED → (negotiation) → ACCEPTED → IN_PROGRESS → COMPLETED
                                           DISPUTED → resolved
 ```
 
-## Key rules
-
-| Rule | Enforced by |
-|------|-------------|
-| Only rider starts ride | require(msg.sender == ride.rider) |
-| Only rider completes ride | require(msg.sender == ride.rider) |
-| Fare must be within band | require(fare >= bandMin && fare <= bandMax) |
-| Platform fee max 10% | require(_pct <= 10) |
-| Amendment blocks completion | require(!amendmentPending) |
-| Dispute blocks timeout | require(state != DISPUTED) |
+---
 
 ## Built with
 
 - Solidity 0.8.20
 - Hardhat
 - OpenZeppelin Contracts
-- Polygon PoS (deployment target)
+- Polygon PoS
+
+---
 
 ## Author
 
-Elijah Patti — elijahpatti4-dot (GitHub)
-Repository: https://github.com/elijahpatti4-dot/ridehailing-contracts
+Elijah Patti · [elijahpatti4-dot](https://github.com/elijahpatti4-dot)
+
+---
+
+## License
+
+MIT — fork it, build on it, improve it.
