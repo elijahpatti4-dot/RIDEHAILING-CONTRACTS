@@ -655,4 +655,56 @@ describe("RideHailing Contract", function () {
 
   });
 
+  // ── C-1 regression — rider accepts a driver counter-offer ────────────────
+  // Guards against the pre-audit Critical: r.driver must be assigned from
+  // r.offerFrom when the RIDER is the accepting party, otherwise settlement
+  // pays address(0) and all onlyDriver functions brick.
+
+  describe("C-1 regression — rider accepts driver counter-offer", function () {
+    beforeEach(async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), 0
+      );
+      await rideHailing.connect(driver).counterOffer(1, USDC(14));
+    });
+
+    it("assigns the driver when the rider accepts the counter-offer", async function () {
+      await rideHailing.connect(rider).acceptOffer(1);
+      const ride = await rideHailing.getRide(1);
+      expect(ride.driver).to.equal(driver.address);
+      expect(ride.agreedFare).to.equal(USDC(14));
+      expect(ride.state).to.equal(1); // ACCEPTED
+    });
+
+    it("settles payment to the driver (not address(0)) on completion", async function () {
+      await rideHailing.connect(rider).acceptOffer(1);
+      await rideHailing.connect(rider).startRide(1);
+      const before = await usdc.balanceOf(driver.address);
+      await rideHailing.connect(rider).completeRide(1);
+      const after = await usdc.balanceOf(driver.address);
+      const fee = (USDC(14) * 5n) / 100n;   // 5% platform fee
+      const bond = (USDC(14) * 10n) / 100n; // NEW-tier bond returned
+      expect(after - before).to.equal(USDC(14) - fee + bond);
+      const ride = await rideHailing.getRide(1);
+      expect(ride.state).to.equal(3); // COMPLETED
+    });
+
+    it("onlyDriver functions work for the assigned driver after rider-accept", async function () {
+      await rideHailing.connect(rider).acceptOffer(1);
+      await rideHailing.connect(rider).startRide(1);
+      await expect(
+        rideHailing.connect(driver).submitRouteLog(1, ROUTE_LOG)
+      ).to.emit(rideHailing, "RouteLogSubmitted");
+    });
+
+    it("rider cannot accept their own standing offer", async function () {
+      await rideHailing.connect(rider).requestRide(
+        PICKUP, DROPOFF, REC_FARE, EXPECTED_DURATION, USDC(10), 0
+      );
+      await expect(
+        rideHailing.connect(rider).acceptOffer(2)
+      ).to.be.revertedWith("Cannot accept your own offer");
+    });
+  });
+
 });
