@@ -22,6 +22,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
     uint256 public negotiationWindow = 3 minutes;
     uint256 public bandMinPct = 75;
     uint256 public bandMaxPct = 133;
+    uint8  public maxAmendmentsPerRide = 3;     // M-4: hard cap on amendments
+    uint256 public amendmentCooldown = 5 minutes; // M-4: min gap between amendments
 
     enum RideState { REQUESTED, ACCEPTED, IN_PROGRESS, COMPLETED, DISPUTED, CANCELLED }
     enum DisputeTier { NONE, AUTO, COMMUNITY, KLEROS }
@@ -50,6 +52,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
         uint256 completedAt;
         RideState state;
         bool amendmentPending;
+        uint8 amendmentsUsed;        // M-4: track total amendments per ride
+        uint256 lastAmendmentAt;     // M-4: cooldown enforcement
         bytes32 newDropoffHash;
         uint256 newFareProposed;
         DisputeTier disputeTier;
@@ -74,6 +78,7 @@ contract RideHailing is ReentrancyGuard, Ownable {
 
     mapping(uint256 => Ride) public rides;
     mapping(address => Reputation) public reputations;
+    mapping(uint256 => mapping(address => bool)) public hasRated;
     uint256 public rideCount;
 
     event PricingOracleSet(address indexed oracle);
@@ -186,8 +191,13 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(msg.sender != r.offerFrom, "Cannot accept your own offer");
         require(msg.sender == r.rider || reputations[msg.sender].isVerifiedDriver, "Only rider or verified driver can accept");
         if (msg.sender != r.rider) {
+            // Driver accepting rider's offer
             require(r.driver == address(0), "Ride already has a driver");
             r.driver = msg.sender;
+        } else {
+            // Rider accepting a driver's counter-offer — r.offerFrom is the driver
+            require(r.offerFrom != r.rider, "No driver offer to accept");
+            r.driver = r.offerFrom;
         }
         r.agreedFare = r.currentOffer;
         ReputationTier driverTier = reputations[r.driver].tier;
@@ -199,19 +209,21 @@ contract RideHailing is ReentrancyGuard, Ownable {
         }
         r.driverBond = bond;
         r.acceptedAt = block.timestamp;
-        r.state = RideState.ACCEPTED;
 
+        // M-1: perform transfers before state change (CEI — interactions last)
         // USDC rides: lock rider escrow now. CASH/MPESA rides: no rider escrow.
         if (r.paymentMethod == PaymentMethod.USDC) {
             require(usdc.transferFrom(r.rider, address(this), r.agreedFare), "Rider USDC deposit failed");
         }
         if (bond > 0) { require(usdc.transferFrom(r.driver, address(this), bond), "Driver bond deposit failed"); }
+
+        r.state = RideState.ACCEPTED; // state change after all transfers succeed
         emit RideAccepted(rideId, r.driver, r.agreedFare);
     }
 
     function cancelNegotiation(uint256 rideId) external inState(rideId, RideState.REQUESTED) {
         Ride storage r = rides[rideId];
-        require(msg.sender == r.rider || msg.sender == r.driver, "Only rider or driver can cancel");
+        require(msg.sender == r.rider || (r.driver != address(0) && msg.sender == r.driver), "Only the rider or an assigned driver can cancel");
         r.state = RideState.CANCELLED;
         emit RideCancelled(rideId);
     }
@@ -231,8 +243,12 @@ contract RideHailing is ReentrancyGuard, Ownable {
     function proposeAmendment(uint256 rideId, bytes32 _newDropoffHash, uint256 _newFare) external onlyRider(rideId) inState(rideId, RideState.IN_PROGRESS) {
         Ride storage r = rides[rideId];
         require(!r.amendmentPending, "Amendment already pending");
+        require(r.amendmentsUsed < maxAmendmentsPerRide, "Amendment limit reached"); // M-4
+        require(block.timestamp >= r.lastAmendmentAt + amendmentCooldown, "Amendment cooldown active"); // M-4
         require(_newFare >= r.bandMin && _newFare <= r.bandMax, "New fare outside band");
         r.amendmentPending = true;
+        r.amendmentsUsed++;           // M-4
+        r.lastAmendmentAt = block.timestamp; // M-4
         r.newDropoffHash = _newDropoffHash;
         r.newFareProposed = _newFare;
         emit AmendmentProposed(rideId, _newDropoffHash, _newFare);
@@ -313,7 +329,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(msg.sender == r.driver, "Only the driver can confirm M-Pesa received");
         require(r.paymentMethod == PaymentMethod.MPESA, "Not an M-Pesa ride");
         require(r.settlementPending, "Settlement not pending");
-        require(bytes(mpesaCode).length > 0, "M-Pesa code required");
+        require(bytes(mpesaCode).length > 0,  "M-Pesa code required");
+        require(bytes(mpesaCode).length <= 20, "M-Pesa code too long"); // L-4
 
         r.settlementPending = false;
         r.mpesaCode = mpesaCode;
@@ -420,6 +437,8 @@ contract RideHailing is ReentrancyGuard, Ownable {
         require(r.state == RideState.COMPLETED, "Ride not completed");
         require(score >= 1 && score <= 5, "Score must be 1 to 5");
         require(msg.sender == r.rider || msg.sender == r.driver, "Only ride participants can rate");
+        require(!hasRated[rideId][msg.sender], "Already rated this ride");
+        hasRated[rideId][msg.sender] = true;
         address rated = msg.sender == r.rider ? r.driver : r.rider;
         reputations[rated].ratingSum += score;
         reputations[rated].ratingCount++;

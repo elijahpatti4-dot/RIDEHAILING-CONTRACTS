@@ -139,6 +139,9 @@ contract RideChainToken is ERC20Votes, Ownable, ReentrancyGuard {
 
     event DriverPoolRebalanced(uint256 participantCount, uint256 timestamp);
     event RiderPoolRebalanced (uint256 participantCount, uint256 timestamp);
+    // H-2: full input arrays emitted for off-chain auditability
+    event DriverPoolInputs(address[] drivers, uint256[] ridesCompleted, uint256[] avgRatingScaled);
+    event RiderPoolInputs(address[] riders, uint256[] ridesTaken, uint256[] behaviourMultipliers);
     event DriverTokensClaimed (address indexed driver, uint256 amount);
     event RiderTokensClaimed  (address indexed rider,  uint256 amount);
     event TreasuryProposalCreated(uint256 indexed id, address recipient, uint256 amount);
@@ -249,6 +252,11 @@ contract RideChainToken is ERC20Votes, Ownable, ReentrancyGuard {
             totalScore += scores[i];
         }
 
+        require( // M-3: enforce one rebalance per day
+            block.timestamp >= lastRebalanceTime + REBALANCE_INTERVAL,
+            "Rebalance not due yet"
+        );
+
         if (totalScore == 0) return; // no scoreable activity — skip silently
 
         for (uint256 i = 0; i < drivers.length; i++) {
@@ -257,6 +265,7 @@ contract RideChainToken is ERC20Votes, Ownable, ReentrancyGuard {
         }
 
         lastRebalanceTime = block.timestamp;
+        emit DriverPoolInputs(drivers, ridesCompleted, avgRatingScaled); // H-2
         emit DriverPoolRebalanced(drivers.length, block.timestamp);
     }
 
@@ -310,6 +319,11 @@ contract RideChainToken is ERC20Votes, Ownable, ReentrancyGuard {
             totalScore += scores[i];
         }
 
+        require( // M-3: enforce one rebalance per day
+            block.timestamp >= lastRebalanceTime + REBALANCE_INTERVAL,
+            "Rebalance not due yet"
+        );
+
         if (totalScore == 0) return;
 
         for (uint256 i = 0; i < riders.length; i++) {
@@ -317,6 +331,7 @@ contract RideChainToken is ERC20Votes, Ownable, ReentrancyGuard {
         }
 
         lastRebalanceTime = block.timestamp;
+        emit RiderPoolInputs(riders, ridesTaken, behaviourMultipliers); // H-2
         emit RiderPoolRebalanced(riders.length, block.timestamp);
     }
 

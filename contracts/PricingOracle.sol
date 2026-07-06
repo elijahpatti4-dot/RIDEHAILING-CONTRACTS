@@ -55,6 +55,9 @@ contract PricingOracle is Ownable {
 
     // ── Chainlink Automation ──────────────────────────────────────────────────
 
+    /// @notice H-4: only this address (Chainlink registry) or owner may call performUpkeep.
+    address public chainlinkAutomationRegistry;
+
     uint256 public lastUpdateTime;
     uint256 public constant UPDATE_INTERVAL = 1 hours;
 
@@ -67,6 +70,7 @@ contract PricingOracle is Ownable {
     );
     event SurgeUpdated(uint256 surgeMultiplierBps);
     event OracleUpkeepPerformed(uint256 timestamp);
+    event AutomationRegistrySet(address indexed registry);
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -156,7 +160,7 @@ contract PricingOracle is Ownable {
     function checkUpkeep(bytes calldata)
         external
         view
-        returns (bool upkeepNeeded, bytes memory /* performData */)
+        returns (bool upkeepNeeded, bytes memory performData)
     {
         upkeepNeeded = (block.timestamp - lastUpdateTime) >= UPDATE_INTERVAL;
     }
@@ -169,7 +173,18 @@ contract PricingOracle is Ownable {
      *         reads real-time demand (active rides, time-of-day traffic score)
      *         and writes the new surgeMultiplierBps in the same transaction.
      */
+    /// @notice H-4: set the Chainlink Automation registry address.
+    function setAutomationRegistry(address _registry) external onlyOwner {
+        require(_registry != address(0), "Invalid registry address");
+        chainlinkAutomationRegistry = _registry;
+        emit AutomationRegistrySet(_registry);
+    }
+
     function performUpkeep(bytes calldata) external {
+        require(
+            msg.sender == chainlinkAutomationRegistry || msg.sender == owner(),
+            "Not authorised: only Chainlink registry or owner" // H-4
+        );
         require(
             (block.timestamp - lastUpdateTime) >= UPDATE_INTERVAL,
             "Upkeep not needed yet"

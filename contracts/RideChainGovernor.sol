@@ -8,6 +8,7 @@ import "@openzeppelin/contracts/governance/extensions/GovernorVotes.sol";
 import "@openzeppelin/contracts/governance/extensions/GovernorTimelockControl.sol";
 import "@openzeppelin/contracts/governance/TimelockController.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title  RideChainGovernor
@@ -124,9 +125,9 @@ contract RideChainGovernor is
     )
         Governor("RideChainGovernor")
         GovernorSettings(
-            1,          // votingDelay: 1 block
-            50400,      // votingPeriod: ~7 days at 12s/block
-            0           // proposalThreshold: 0 tokens to propose
+            1,                  // votingDelay: 1 block
+            50400,              // votingPeriod: ~7 days at 12s/block
+            1_000 * 1e18        // M-2: proposalThreshold — must hold 1,000 RCT to propose
         )
         GovernorVotes(IVotes(address(_token)))
         GovernorTimelockControl(_timelock)
@@ -145,15 +146,17 @@ contract RideChainGovernor is
     // ── Quadratic voting override ─────────────────────────────────────────────
 
     /**
-     * @dev Override _getVotes to use RideChainToken.getVotingPower() (quadratic).
-     *      This replaces the standard ERC20Votes linear balance.
+     * @dev H-3: Use checkpointed past votes (snapshot at proposal creation block)
+     *      to prevent flash-loan / buy-vote-sell governance attacks.
+     *      Quadratic weight = sqrt(pastVotes) so large holders cannot dominate.
      */
     function _getVotes(
         address account,
-        uint256 /* blockNumber */,
+        uint256 blockNumber,
         bytes memory /* params */
     ) internal view override(Governor, GovernorVotes) returns (uint256) {
-        return IRideChainToken(address(token)).getVotingPower(account);
+        uint256 pastVotes = token.getPastVotes(account, blockNumber);
+        return Math.sqrt(pastVotes);
     }
 
     // ── Constitutional tagging ────────────────────────────────────────────────
@@ -333,8 +336,10 @@ contract RideChainGovernor is
         public pure override(IGovernor)
         returns (uint256)
     {
-        // 4% of sqrt(total supply) — adjustable via governance later
-        return 20_000; // sqrt(400M) ≈ 20,000 quadratic votes
+        // L-1 fix: sqrt(100,000,000 RCT) = 10,000 quadratic votes.
+        // Quorum = 4% of max quadratic supply ≈ 400 votes.
+        // Set conservatively higher at 1,000 to ensure meaningful participation.
+        return 1_000; // adjustable via governance upgrade later
     }
 
     function proposalThreshold()
