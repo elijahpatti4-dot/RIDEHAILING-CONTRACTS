@@ -8,6 +8,10 @@ Built for drivers in emerging markets who lose 25–30% of every fare to platfor
 
 **Target market:** Nairobi, Kenya · **Mainnet launch:** Q3 2026 · **Network:** Polygon PoS
 
+![RideChain demo — a complete ride settled on-chain: request, driver accept with bond, escrow, payment and rating](docs/ridechain-demo-ride.gif)
+
+*A real end-to-end ride on Polygon Amoy: rider books and pays $1.50 USDC into escrow, driver accepts with a bond, ride completes, the contract settles 95% to the driver and 5% to the treasury, and both parties rate each other — every step an on-chain transaction.*
+
 ---
 
 ## Support this project
